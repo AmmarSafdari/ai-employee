@@ -164,6 +164,10 @@ class WhatsAppWatcher(BaseWatcher):
         """
         Open WhatsApp Web, find unread keyword chats, extract all data,
         close browser. Returns list of plain dicts (no Playwright elements).
+
+        WhatsApp Web removed all data-testid attributes (as of 2026).
+        Uses ARIA roles instead: role=grid (chat list), role=row (chat rows),
+        role=gridcell (cells: title+date, unread badge).
         """
         messages = []
 
@@ -171,61 +175,83 @@ class WhatsAppWatcher(BaseWatcher):
             browser = p.chromium.launch_persistent_context(
                 str(self.session_path),
                 headless=headless,
-                args=["--no-sandbox"],
+                args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/133.0.0.0 Safari/537.36"
+                ),
             )
 
             # Use existing page or open a new one
             page = browser.pages[0] if browser.pages else browser.new_page()
-            page.goto("https://web.whatsapp.com", wait_until="domcontentloaded")
+            page.goto("https://web.whatsapp.com", wait_until="networkidle")
 
-            # Wait for the chat list to confirm session is valid
+            # WhatsApp Web shows "Your messages are downloading" for ~20s on first load.
+            # Wait for [role="grid"] (the chat list) — timeout 60s to allow full sync.
             try:
-                page.wait_for_selector('[data-testid="chat-list"]', timeout=20_000)
+                page.wait_for_selector('[role="grid"]', timeout=60_000)
             except PlaywrightTimeout:
                 browser.close()
-                raise PlaywrightTimeout("Chat list not found — session may need renewal")
+                raise PlaywrightTimeout("Chat grid not found — session may need renewal")
 
-            # Small settle delay for unread badges to render
-            page.wait_for_timeout(2000)
+            # Extra settle time for unread badges to render
+            page.wait_for_timeout(3000)
 
-            # Find all chat rows with an unread count badge
-            unread_chats = page.query_selector_all('[data-testid="cell-frame-container"]')
-
-            for chat in unread_chats:
-                # Check for unread count badge inside this chat row
-                badge = chat.query_selector('[data-testid="icon-unread-count"]')
-                if not badge:
-                    # Fallback: look for any element with 'unread' in aria-label
-                    badge = chat.query_selector('[aria-label*="unread"]')
-                if not badge:
-                    continue
-
-                # Extract sender name
-                title_el = chat.query_selector('[data-testid="cell-frame-title"]')
-                sender = title_el.inner_text().strip() if title_el else "Unknown"
-
-                # Extract last message preview
-                subtitle_el = chat.query_selector('[data-testid="last-msg-status"] + span')
-                if not subtitle_el:
-                    subtitle_el = chat.query_selector('[data-testid="cell-frame-secondary-detail"]')
-                text = subtitle_el.inner_text().strip() if subtitle_el else chat.inner_text().strip()
-
-                # Keyword filter
-                text_lower = text.lower()
-                matched = [kw for kw in self.keywords if kw in text_lower]
-                if not matched:
-                    continue
-
-                # All data extracted as plain Python -- safe after browser.close()
-                messages.append({
-                    "sender": sender,
-                    "text": text,
-                    "keywords_matched": matched,
-                })
+            # Extract all chat rows in one JS call to avoid stale element issues.
+            # Structure (WhatsApp Web 2026, ARIA-based):
+            #   [role="grid"]           — chat list container
+            #     [role="row"]          — one chat entry
+            #       [role="gridcell"]   — title+date cell (class _ak8o, 2 children)
+            #       [role="gridcell"]   — unread badge cell (class _ak8i, 3 children)
+            # Unread: badge cell innerText is a number string ("1", "7", "9", …)
+            chat_data = page.evaluate("""
+                () => {
+                    var rows = document.querySelectorAll('[role="row"]');
+                    var results = [];
+                    rows.forEach(function(row) {
+                        var cells = row.querySelectorAll('[role="gridcell"]');
+                        if (cells.length < 2) return;
+                        // Title cell: first line = sender name
+                        var titleText = (cells[0].innerText || '').trim();
+                        var lines = titleText.split('\\n');
+                        var sender = lines[0].trim();
+                        // Last cell: unread count (empty string = read)
+                        var badgeCell = cells[cells.length - 1];
+                        var badgeText = (badgeCell.innerText || '').trim();
+                        var isUnread = badgeText !== '' && /^[0-9]+$/.test(badgeText);
+                        // Full row text for keyword scanning
+                        var fullText = (row.innerText || '').trim();
+                        results.push({
+                            sender: sender,
+                            full_text: fullText,
+                            unread_count: isUnread ? parseInt(badgeText) : 0,
+                            is_unread: isUnread
+                        });
+                    });
+                    return results;
+                }
+            """)
 
             browser.close()
 
-        self.logger.info(f"WhatsApp: scanned chats, {len(messages)} keyword match(es) found.")
+        # Filter: unread chats with keyword matches
+        for chat in chat_data:
+            if not chat.get("is_unread"):
+                continue
+            text = chat["full_text"]
+            text_lower = text.lower()
+            matched = [kw for kw in self.keywords if kw in text_lower]
+            if not matched:
+                continue
+            messages.append({
+                "sender": chat["sender"] or "Unknown",
+                "text": text,
+                "keywords_matched": matched,
+                "unread_count": chat["unread_count"],
+            })
+
+        self.logger.info(f"WhatsApp: scanned {len(chat_data)} chats, {len(messages)} keyword match(es) found.")
         return messages
 
     # ── Setup mode (first-time QR scan) ──────────────────────────────────────
@@ -252,7 +278,8 @@ class WhatsAppWatcher(BaseWatcher):
             print("(WhatsApp > Linked Devices > Link a Device)\n")
 
             try:
-                page.wait_for_selector('[data-testid="chat-list"]', timeout=300_000)
+                # Wait for chat grid (ARIA role — WhatsApp removed data-testid in 2026)
+                page.wait_for_selector('[role="grid"]', timeout=300_000)
                 print("\n[OK] WhatsApp session saved successfully.")
                 print(f"Session stored at: {self.session_path}")
                 print(f"\nNext step: set in .env:")

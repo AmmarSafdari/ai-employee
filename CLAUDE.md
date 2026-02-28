@@ -90,6 +90,7 @@ Sensitive actions (external calls, deletes, sends) go through `/Pending_Approval
 | Audit Log | `/skills/audit_log.skill.md` | Comprehensive structured logging standard |
 | Ralph Wiggum | `/skills/ralph_wiggum.skill.md` | Autonomous stop hook / iteration loop pattern |
 | Sentinel | `/skills/sentinel.skill.md` | Watcher/sentinel design contract + how to add new ones |
+| WhatsApp | `/skills/whatsapp.skill.md` | Inbound detection (Playwright) + outbound replies (Business API) |
 
 ## Trust Tracking
 

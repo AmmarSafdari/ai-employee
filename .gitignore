@@ -2,6 +2,8 @@
 .env
 .env.local
 .env.*.local
+credentials.json
+.claude/gmail_credentials.json
 
 # Claude agent state (contains OAuth tokens + session data)
 .claude/gmail_token.json

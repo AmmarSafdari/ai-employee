@@ -202,7 +202,7 @@ def setup_schedule():
 
     print("Schedule registered:")
     print("  Every  5 min  — Gmail check")
-    print("  Every  5 min  — WhatsApp check (Twilio)")
+    print("  Every  5 min  — WhatsApp check (Playwright / WhatsApp Web)")
     print("  Every 10 min  — LinkedIn publish approved posts")
     print("  Every 15 min  — Social media mentions (FB/Twitter)")
     print("  Every 30 min  — Odoo events (overdue invoices, new orders)")
